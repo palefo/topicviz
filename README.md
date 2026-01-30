@@ -15,7 +15,7 @@ It uses:
 
 ## Example output
 
-![topic map placeholder](docs/topic_map.png)
+![topic map placeholder](docs/topic_map_notebookdemo.png)
 
 ## Install
 
