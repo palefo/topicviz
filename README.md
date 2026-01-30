@@ -15,7 +15,7 @@ It uses:
 
 ## Example output
 
-![topic map placeholder](docs/topic_map_notebookdemo.png)
+![topic map](docs/topic_map_notebookdemo.png)
 
 ## Install
 
@@ -76,6 +76,8 @@ Creates a Plotly figure.
 Returns a Plotly `Figure`.
 
 ## Bourdieu map
+
+![bourdieu map](docs/bourdieu_map_notebookdemo.png)
 
 `topicviz` also supports a **Bourdieu map**: a 2D semantic plane defined by two contrasting axes.  
 Each document is positioned by *relative cosine similarity* to the axis poles:
