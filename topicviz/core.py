@@ -13,6 +13,87 @@ try:
 except Exception:  # pragma: no cover
     umap = None
 
+import numpy as np
+import plotly.graph_objects as go
+
+def _l2_normalize(x: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    n = np.linalg.norm(x, axis=-1, keepdims=True)
+    return x / np.maximum(n, eps)
+
+def _embed_texts(embedding_model, texts, batch_size: int = 64, normalize: bool = True) -> np.ndarray:
+    """
+    Supports:
+      - SentenceTransformer: .encode(list[str], ...)
+      - LangChain HF embeddings: .embed_documents(list[str])
+    """
+    texts = [str(t) for t in texts]
+    if hasattr(embedding_model, "encode"):
+        emb = embedding_model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=True,
+            normalize_embeddings=normalize,
+        )
+        emb = np.asarray(emb, dtype=float)
+        if normalize:
+            # SentenceTransformer normalize_embeddings=True already does this,
+            # but keep for safety if a model ignores it.
+            emb = _l2_normalize(emb)
+        return emb
+
+    if hasattr(embedding_model, "embed_documents"):
+        emb = embedding_model.embed_documents(texts)
+        emb = np.asarray(emb, dtype=float)
+        if normalize:
+            emb = _l2_normalize(emb)
+        return emb
+
+    raise TypeError(
+        "embedding_model must provide either `.encode(texts, ...)` (SentenceTransformer) "
+        "or `.embed_documents(texts)` (LangChain embeddings)."
+    )
+
+def _convex_hull(points: np.ndarray) -> np.ndarray:
+    """Monotone chain convex hull. Returns hull points in order."""
+    pts = np.unique(points, axis=0)
+    if len(pts) <= 2:
+        return pts
+
+    pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+
+    return np.vstack((lower[:-1], upper[:-1]))
+
+def _chaikin_closed(poly: np.ndarray, iterations: int = 3) -> np.ndarray:
+    """Chaikin corner-cutting to smooth a closed polygon boundary."""
+    if poly.shape[0] < 3:
+        return poly
+    pts = poly.copy()
+    for _ in range(iterations):
+        new_pts = []
+        n = pts.shape[0]
+        for i in range(n):
+            p0 = pts[i]
+            p1 = pts[(i + 1) % n]
+            q = 0.75 * p0 + 0.25 * p1
+            r = 0.25 * p0 + 0.75 * p1
+            new_pts.extend([q, r])
+        pts = np.array(new_pts, dtype=float)
+    return pts
 
 def _as_list_of_str(docs: Union[Sequence[str], np.ndarray, Iterable[str]]) -> List[str]:
     if isinstance(docs, np.ndarray):
@@ -349,6 +430,186 @@ class TopicViz:
             template="plotly_white",
             xaxis=dict(visible=False, range=[xlim[0], xlim[1]]),
             yaxis=dict(visible=False, range=[ylim[0], ylim[1]]),
+            margin=dict(l=10, r=10, t=50, b=10),
+            showlegend=False,
+        )
+        return fig
+    
+    def visualize_bourdieu(
+        self,
+        *,
+        docs: Optional[List[str]] = None,
+        embedding_model=None,
+        embedding_batch_size: int = 64,
+        x_left_words: List[str],
+        x_right_words: List[str],
+        y_top_words: List[str],
+        y_bottom_words: List[str],
+        radius_size: float = 0.2,
+        height: int = 800,
+        width: int = 800,
+        clustering: bool = False,
+        n_clusters: int = 8,
+        density: bool = False,
+        convex_hull: bool = True,
+        hull_smooth: bool = True,
+        hull_smooth_iters: int = 3,
+        colorscale: str = "Blues",
+        point_color: str = "rgba(255, 70, 70, 0.55)",
+        point_opacity: float = 0.55,
+        title: str = "Bourdieu map",
+    ) -> "go.Figure":
+        """
+        Bourdieu map: place documents using two semantic axes defined by seed phrases.
+
+        X coordinate: sim(doc, x_right) - sim(doc, x_left)
+        Y coordinate: sim(doc, y_top)   - sim(doc, y_bottom)
+
+        - `docs` defaults to the docs used in `fit()`, if available.
+        - `embedding_model` is required (SentenceTransformer or LangChain HF embeddings).
+        """
+        # pick docs
+        if docs is None:
+            if getattr(self, "docs_", None) is None:
+                raise ValueError("Provide `docs=...` or call `fit(docs, ...)` first so TopicViz has docs_.")
+            docs = self.docs_
+
+        if embedding_model is None:
+            raise ValueError("`embedding_model` is required for visualize_bourdieu().")
+
+        # embeddings
+        doc_emb = _embed_texts(embedding_model, docs, batch_size=embedding_batch_size, normalize=True)
+
+        # seed embeddings (average per pole)
+        def pole_vec(words: List[str]) -> np.ndarray:
+            pole_emb = _embed_texts(embedding_model, words, batch_size=min(32, len(words)), normalize=True)
+            v = pole_emb.mean(axis=0)
+            return _l2_normalize(v)
+
+        xL = pole_vec(x_left_words)
+        xR = pole_vec(x_right_words)
+        yT = pole_vec(y_top_words)
+        yB = pole_vec(y_bottom_words)
+
+        # cosine similarity since everything normalized: dot product
+        sim_xR = doc_emb @ xR
+        sim_xL = doc_emb @ xL
+        sim_yT = doc_emb @ yT
+        sim_yB = doc_emb @ yB
+
+        x = sim_xR - sim_xL
+        y = sim_yT - sim_yB
+
+        # optional clustering (lightweight): KMeans on (x,y)
+        labels = None
+        if clustering:
+            from sklearn.cluster import KMeans
+            XY = np.column_stack([x, y])
+            km = KMeans(n_clusters=n_clusters, random_state=getattr(self, "random_state", 42), n_init="auto")
+            labels = km.fit_predict(XY)
+
+        # point size heuristic based on radius_size
+        # (radius_size in Bunka feels like a small fraction; map it to marker size)
+        marker_size = max(3, int(radius_size * 50))
+
+        fig = go.Figure()
+
+        # density layer
+        if density:
+            fig.add_trace(
+                go.Histogram2dContour(
+                    x=x,
+                    y=y,
+                    colorscale=colorscale,
+                    showscale=False,
+                    ncontours=18,
+                    contours=dict(showlines=True),
+                    opacity=0.55,
+                    hoverinfo="skip",
+                )
+            )
+
+        # scatter
+        if labels is None:
+            fig.add_trace(
+                go.Scattergl(
+                    x=x,
+                    y=y,
+                    mode="markers",
+                    marker=dict(size=marker_size, color=point_color, opacity=point_opacity),
+                    text=[(d[:180] + "…") if len(d) > 180 else d for d in docs],
+                    hovertemplate="%{text}<extra></extra>",
+                    showlegend=False,
+                )
+            )
+        else:
+            # color by cluster id using Plotly default palette (no legend by default)
+            for k in np.unique(labels):
+                mask = labels == k
+                fig.add_trace(
+                    go.Scattergl(
+                        x=x[mask],
+                        y=y[mask],
+                        mode="markers",
+                        marker=dict(size=marker_size, opacity=point_opacity),
+                        text=[(docs[i][:180] + "…") if len(docs[i]) > 180 else docs[i] for i in np.where(mask)[0]],
+                        hovertemplate="%{text}<extra></extra>",
+                        showlegend=False,
+                        name=str(k),
+                    )
+                )
+
+        # convex hull (global hull around all points)
+        if convex_hull and len(x) >= 10:
+            pts = np.column_stack([x, y])
+            hull = _convex_hull(pts)
+            if hull.shape[0] >= 3:
+                hull2 = _chaikin_closed(hull, iterations=hull_smooth_iters) if hull_smooth else hull
+                hx = np.append(hull2[:, 0], hull2[0, 0])
+                hy = np.append(hull2[:, 1], hull2[0, 1])
+                fig.add_trace(
+                    go.Scatter(
+                        x=hx,
+                        y=hy,
+                        mode="lines",
+                        line=dict(color="rgba(0,0,0,0.55)", width=1, dash="dot"),
+                        fill="toself",
+                        fillcolor="rgba(0,0,0,0)",
+                        hoverinfo="skip",
+                        showlegend=False,
+                    )
+                )
+
+        # axis labels (place at plot extremes)
+        x_min, x_max = float(np.min(x)), float(np.max(x))
+        y_min, y_max = float(np.min(y)), float(np.max(y))
+        pad_x = (x_max - x_min) * 0.08 if x_max > x_min else 0.5
+        pad_y = (y_max - y_min) * 0.08 if y_max > y_min else 0.5
+
+        def join_words(words: List[str]) -> str:
+            # display as a compact label
+            return "<br>".join(words[:2]) if len(words) > 1 else (words[0] if words else "")
+
+        fig.add_annotation(x=x_min - pad_x, y=0, text=join_words(x_left_words), showarrow=False,
+                        font=dict(size=12, color="rgb(40,60,220)"),
+                        bgcolor="rgba(255,255,255,0.9)", bordercolor="rgba(120,120,255,0.8)", borderwidth=1)
+        fig.add_annotation(x=x_max + pad_x, y=0, text=join_words(x_right_words), showarrow=False,
+                        font=dict(size=12, color="rgb(40,60,220)"),
+                        bgcolor="rgba(255,255,255,0.9)", bordercolor="rgba(120,120,255,0.8)", borderwidth=1)
+        fig.add_annotation(x=0, y=y_max + pad_y, text=join_words(y_top_words), showarrow=False,
+                        font=dict(size=12, color="rgb(40,60,220)"),
+                        bgcolor="rgba(255,255,255,0.9)", bordercolor="rgba(120,120,255,0.8)", borderwidth=1)
+        fig.add_annotation(x=0, y=y_min - pad_y, text=join_words(y_bottom_words), showarrow=False,
+                        font=dict(size=12, color="rgb(40,60,220)"),
+                        bgcolor="rgba(255,255,255,0.9)", bordercolor="rgba(120,120,255,0.8)", borderwidth=1)
+
+        fig.update_layout(
+            title=title,
+            width=width,
+            height=height,
+            template="plotly_white",
+            xaxis=dict(title="", zeroline=True, showgrid=False),
+            yaxis=dict(title="", zeroline=True, showgrid=False),
             margin=dict(l=10, r=10, t=50, b=10),
             showlegend=False,
         )
