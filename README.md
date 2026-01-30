@@ -74,3 +74,47 @@ Creates a Plotly figure.
 - `hover_max_chars` (int): Truncate hover text to this many characters.
 
 Returns a Plotly `Figure`.
+
+## Bourdieu map
+
+`topicviz` also supports a **Bourdieu map**: a 2D semantic plane defined by two contrasting axes.  
+Each document is positioned by *relative cosine similarity* to the axis poles:
+
+- **X** = sim(doc, `x_right_words`) − sim(doc, `x_left_words`)
+- **Y** = sim(doc, `y_top_words`) − sim(doc, `y_bottom_words`)
+
+This visualization is embedding-based (SentenceTransformer recommended).
+
+### Example
+
+```python
+from sentence_transformers import SentenceTransformer
+from topicviz import TopicViz
+
+embedding_model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+
+tv = TopicViz(n_topics=12, random_state=42).fit(docs, embedding_model=embedding_model)
+
+fig = tv.visualize_bourdieu(
+    docs=docs,  # optional if you already fit on the same docs
+    embedding_model=embedding_model,
+    x_left_words=["This shows high autonomy satisfaction"],
+    x_right_words=["This shows low autonomy satisfaction"],
+    y_top_words=["This shows high autonomy frustration"],
+    y_bottom_words=["This shows low autonomy frustration"],
+    radius_size=0.2,
+    width=800,
+    height=800,
+    clustering=False,
+    density=False,
+    convex_hull=True,
+)
+fig.show()
+```
+
+Parameters (summary)
+-	`x_left_words, x_right_words, y_top_words, y_bottom_words (list[str])`: Anchor phrases for each pole.
+-	`radius_size (float)`: Controls marker size (roughly).
+-	`clustering (bool) + n_clusters (int)`: Optional clustering in Bourdieu space.
+-	`density (bool)`: Optional density contours.
+-	`convex_hull (bool)`: Optional boundary around points.
