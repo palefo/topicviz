@@ -15,7 +15,6 @@ It uses:
 
 ## Example output
 
-<!-- Placeholder image. Replace with a real screenshot once available. -->
 ![topic map placeholder](docs/topic_map.png)
 
 ## Install
